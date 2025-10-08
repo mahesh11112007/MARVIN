@@ -1,3 +1,8 @@
+// Backend API base URL (change this to your actual backend URL)
+const API_BASE_URL = window.location.origin.includes('github.io') 
+    ? 'http://localhost:5000/api' 
+    : '/api';
+
 // Smooth scroll to top on page load
 window.addEventListener('load', () => {
     document.body.style.opacity = '0';
@@ -13,17 +18,14 @@ function createRipple(event) {
     const ripple = document.createElement('span');
     const diameter = Math.max(button.clientWidth, button.clientHeight);
     const radius = diameter / 2;
-
     ripple.style.width = ripple.style.height = `${diameter}px`;
     ripple.style.left = `${event.clientX - button.offsetLeft - radius}px`;
     ripple.style.top = `${event.clientY - button.offsetTop - radius}px`;
     ripple.classList.add('ripple');
-
     const rippleEffect = button.getElementsByClassName('ripple')[0];
     if (rippleEffect) {
         rippleEffect.remove();
     }
-
     button.appendChild(ripple);
 }
 
@@ -38,49 +40,114 @@ function handleAction(action) {
             button.style.transform = 'scale(1)';
         }, 150);
     }
-
+    
     // Log action
     console.log(`Action clicked: ${action}`);
     
-    // Show interactive modal instead of alert
+    // Show interactive modal with form
     showActionModal(action);
 }
 
-// Create and show custom modal
+// Create and show custom modal with forms
 function showActionModal(action) {
     // Remove existing modal if any
     const existingModal = document.querySelector('.action-modal');
     if (existingModal) {
         existingModal.remove();
     }
-
+    
     // Create modal
     const modal = document.createElement('div');
     modal.className = 'action-modal';
+    
+    let formHTML = '';
+    
+    // Generate form based on action type
+    switch(action) {
+        case 'Create File':
+            formHTML = `
+                <form id="actionForm" onsubmit="submitAction(event, 'create')">
+                    <div class="form-group">
+                        <label for="filename">Filename:</label>
+                        <input type="text" id="filename" name="filename" placeholder="e.g., main.py" required />
+                    </div>
+                    <div class="form-group">
+                        <label for="code">Code:</label>
+                        <textarea id="code" name="code" rows="10" placeholder="Enter your code here..." required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="language">Language (optional):</label>
+                        <input type="text" id="language" name="language" placeholder="e.g., python, javascript" />
+                    </div>
+                    <button type="submit" class="submit-btn">Create File</button>
+                </form>
+            `;
+            break;
+            
+        case 'Upload File':
+            formHTML = `
+                <form id="actionForm" onsubmit="submitAction(event, 'upload')">
+                    <div class="form-group">
+                        <label for="fileInput">Select File:</label>
+                        <input type="file" id="fileInput" name="file" required />
+                        <small>Upload a code file for processing</small>
+                    </div>
+                    <button type="submit" class="submit-btn">Upload File</button>
+                </form>
+            `;
+            break;
+            
+        case 'Analyze Code':
+            formHTML = `
+                <form id="actionForm" onsubmit="submitAction(event, 'analyze')">
+                    <div class="form-group">
+                        <label for="filename">Filename (optional):</label>
+                        <input type="text" id="filename" name="filename" placeholder="e.g., script.js" />
+                    </div>
+                    <div class="form-group">
+                        <label for="code">Code to Analyze:</label>
+                        <textarea id="code" name="code" rows="10" placeholder="Paste your code here..." required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="language">Language:</label>
+                        <input type="text" id="language" name="language" placeholder="e.g., python, javascript" />
+                    </div>
+                    <button type="submit" class="submit-btn">Analyze Code</button>
+                </form>
+            `;
+            break;
+            
+        case 'Optimize Code':
+            formHTML = `
+                <form id="actionForm" onsubmit="submitAction(event, 'optimize')">
+                    <div class="form-group">
+                        <label for="filename">Filename (optional):</label>
+                        <input type="text" id="filename" name="filename" placeholder="e.g., app.py" />
+                    </div>
+                    <div class="form-group">
+                        <label for="code">Code to Optimize:</label>
+                        <textarea id="code" name="code" rows="10" placeholder="Paste your code here..." required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="language">Language:</label>
+                        <input type="text" id="language" name="language" placeholder="e.g., python, javascript" />
+                    </div>
+                    <button type="submit" class="submit-btn">Optimize Code</button>
+                </form>
+            `;
+            break;
+    }
+    
     modal.innerHTML = `
         <div class="modal-content">
             <div class="modal-header">
-                <h2>🤖 ${action.toUpperCase()}</h2>
-                <button class="close-btn" onclick="closeModal()">&times;</button>
+                🤖 ${action.toUpperCase()}
+                <button class="close-btn" onclick="closeModal()">×</button>
             </div>
             <div class="modal-body">
-                <p>This is a <strong>demo interface</strong> for the ${action} endpoint.</p>
-                <p>To use this feature, send a POST request to:</p>
-                <code>POST /api/${action.toLowerCase()}</code>
-                <div class="endpoint-info">
-                    <h3>Available Endpoints:</h3>
-                    <ul>
-                        <li><span class="endpoint">POST /create</span> - Create new files</li>
-                        <li><span class="endpoint">POST /upload</span> - Upload files for processing</li>
-                        <li><span class="endpoint">POST /analyze</span> - Analyze code structure</li>
-                        <li><span class="endpoint">POST /optimize</span> - Optimize and improve code</li>
-                    </ul>
-                </div>
+                ${formHTML}
             </div>
-            <div class="modal-footer">
-                <button class="demo-btn" onclick="simulateAction('${action}')">Try Demo</button>
-                <button class="close-modal-btn" onclick="closeModal()">Close</button>
-            </div>
+            <div id="responseArea" class="response-area" style="display:none;"></div>
         </div>
     `;
     
@@ -90,6 +157,101 @@ function showActionModal(action) {
     setTimeout(() => {
         modal.classList.add('show');
     }, 10);
+}
+
+// Submit action to backend
+async function submitAction(event, endpoint) {
+    event.preventDefault();
+    
+    const form = event.target;
+    const responseArea = document.getElementById('responseArea');
+    const modalBody = document.querySelector('.modal-body');
+    
+    // Show loading state
+    responseArea.style.display = 'block';
+    responseArea.innerHTML = '<div class="loading-spinner"></div><p>Processing request...</p>';
+    
+    try {
+        let response;
+        
+        if (endpoint === 'upload') {
+            // Handle file upload
+            const formData = new FormData(form);
+            response = await fetch(`${API_BASE_URL}/${endpoint}`, {
+                method: 'POST',
+                body: formData
+            });
+        } else {
+            // Handle JSON data
+            const formData = new FormData(form);
+            const data = {};
+            formData.forEach((value, key) => {
+                data[key] = value;
+            });
+            
+            response = await fetch(`${API_BASE_URL}/${endpoint}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            });
+        }
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            // Success response
+            displaySuccess(result, responseArea, modalBody);
+        } else {
+            // Error response
+            displayError(result.error || 'Request failed', responseArea);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        displayError(`Connection error: ${error.message}. Make sure your backend is running at ${API_BASE_URL}`, responseArea);
+    }
+}
+
+// Display success response
+function displaySuccess(result, responseArea, modalBody) {
+    modalBody.style.display = 'none';
+    responseArea.innerHTML = `
+        <div class="success-message">✅ Success!</div>
+        <div class="response-content">
+            <pre>${JSON.stringify(result, null, 2)}</pre>
+        </div>
+        <button onclick="resetModal()" class="reset-btn">Try Another Request</button>
+        <button onclick="closeModal()" class="close-modal-btn">Close</button>
+    `;
+}
+
+// Display error response
+function displayError(errorMessage, responseArea) {
+    responseArea.innerHTML = `
+        <div class="error-message">❌ Error</div>
+        <div class="error-content">
+            <p>${errorMessage}</p>
+        </div>
+        <button onclick="resetModal()" class="reset-btn">Try Again</button>
+        <button onclick="closeModal()" class="close-modal-btn">Close</button>
+    `;
+}
+
+// Reset modal to show form again
+function resetModal() {
+    const modalBody = document.querySelector('.modal-body');
+    const responseArea = document.getElementById('responseArea');
+    
+    modalBody.style.display = 'block';
+    responseArea.style.display = 'none';
+    responseArea.innerHTML = '';
+    
+    // Reset form
+    const form = document.getElementById('actionForm');
+    if (form) {
+        form.reset();
+    }
 }
 
 // Close modal function
@@ -103,35 +265,7 @@ function closeModal() {
     }
 }
 
-// Simulate action for demo
-function simulateAction(action) {
-    const modalBody = document.querySelector('.modal-body');
-    modalBody.innerHTML = `
-        <div class="loading-spinner"></div>
-        <p>Processing ${action} request...</p>
-    `;
-    
-    setTimeout(() => {
-        modalBody.innerHTML = `
-            <div class="success-message">✅ Demo Complete!</div>
-            <p>In production, this would ${getActionDescription(action)}.</p>
-            <p>Connect your backend to enable full functionality.</p>
-        `;
-    }, 2000);
-}
-
-// Get action description
-function getActionDescription(action) {
-    const descriptions = {
-        'Create File': 'create a new file with AI assistance',
-        'Upload File': 'upload and process your code files',
-        'Analyze Code': 'analyze your code for bugs and improvements',
-        'Optimize Code': 'optimize your code for better performance'
-    };
-    return descriptions[action] || 'perform the requested action';
-}
-
-// Add hover sound effect (optional, subtle)
+// Add hover effect
 function addHoverEffect() {
     const buttons = document.querySelectorAll('button:not(.close-btn):not(.close-modal-btn)');
     buttons.forEach(button => {
@@ -191,7 +325,7 @@ document.addEventListener('keydown', (e) => {
         '4': 'Optimize Code'
     };
     
-    if (shortcuts[e.key]) {
+    if (shortcuts[e.key] && !document.querySelector('.action-modal')) {
         e.preventDefault();
         handleAction(shortcuts[e.key]);
     }
