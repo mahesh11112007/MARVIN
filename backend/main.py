@@ -7,14 +7,17 @@ import shutil
 import hashlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 
 # --- App setup ---
-app = FastAPI(title="MARVIN API", description="AI-Powered Code Editor API", version="1.1.0")
+app = FastAPI(
+    title="MARVIN API", 
+    description="AI-Powered Code Editor API", 
+    version="1.1.0"
+)
 
 # CORS middleware configuration
 app.add_middleware(
@@ -24,6 +27,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add exception handler to always return JSON instead of HTML
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": str(exc),
+            "type": type(exc).__name__
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status_code": exc.status_code
+        }
+    )
+
+# Custom error response for connection errors
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Endpoint not found",
+            "message": "The requested API endpoint does not exist. Make sure the backend is running.",
+            "path": str(request.url.path)
+        }
+    )
 
 # --- Storage setup (safe for serverless) ---
 # Prefer ephemeral /tmp in serverless like Vercel; fallback to local 'storage' for dev
@@ -50,285 +87,224 @@ ALLOWED_EXTS = {
 }
 
 # --- Pydantic models ---
-class CreateFileRequest(BaseModel):
-    filename: str = Field(..., description="File name with extension")
-    content: str
-    language: Optional[str] = None
+class ProjectCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    language: str = Field(default="python")
 
-    @validator("filename")
-    def validate_filename(cls, v: str) -> str:
-        if "/" in v or ".." in v:
-            raise ValueError("Invalid filename")
-        if not any(v.endswith(f".{ext}") for ext in ALLOWED_EXTS):
-            raise ValueError("Unsupported file extension")
-        return v
+class FileUploadResponse(BaseModel):
+    file_id: str
+    filename: str
+    size: int
+    language: str
 
-class CodeRequest(BaseModel):
-    code: str
-    language: Optional[str] = None
-    filename: Optional[str] = "untitled"
+class AnalysisRequest(BaseModel):
+    file_id: str
 
-class APIResponse(BaseModel):
-    status: str
-    message: str
-    data: Optional[dict] = None
+class AnalysisResponse(BaseModel):
+    file_id: str
+    summary: Dict[str, Any]
+    issues: List[Dict[str, Any]]
+    suggestions: List[str]
 
-# --- Helpers ---
+class OptimizationRequest(BaseModel):
+    file_id: str
+    optimization_type: str = Field(default="performance")
 
-def detect_language_from_name(name: str) -> str:
-    ext = name.split(".")[-1].lower() if "." in name else ""
-    return ALLOWED_EXTS.get(ext, ext or "plain")
+class OptimizationResponse(BaseModel):
+    file_id: str
+    optimized_code: str
+    changes: List[Dict[str, Any]]
+    metrics: Dict[str, Any]
 
+# --- Utility functions ---
+def compute_file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()[:16]
 
-def sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
+def detect_language(filename: str) -> Optional[str]:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return ALLOWED_EXTS.get(ext)
 
-
-def safe_write_file(path: Path, content: bytes) -> Dict[str, Any]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    stat = path.stat()
-    return {
-        "path": str(path),
-        "size": stat.st_size,
-        "modified": int(stat.st_mtime),
-        "sha256": sha256_bytes(content),
-    }
-
-
-def analyze_python(code: str) -> Dict[str, Any]:
-    """Static analysis for Python using ast and simple heuristics."""
-    issues: List[Dict[str, Any]] = []
-    metrics: Dict[str, Any] = {}
-
-    lines = code.splitlines()
-    non_empty = [l for l in lines if l.strip()]
-    metrics.update(
-        total_lines=len(lines),
-        code_lines=len(non_empty),
-        blank_lines=len(lines) - len(non_empty),
-        avg_line_length=(sum(len(l) for l in lines) / len(lines)) if lines else 0,
-    )
-
+def analyze_python_code(code: str) -> Dict[str, Any]:
     try:
         tree = ast.parse(code)
-        func_defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-        class_defs = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-        metrics.update(functions=len(func_defs), classes=len(class_defs))
-        # Docstring checks
-        for f in func_defs:
-            if ast.get_docstring(f) in (None, ""):
-                issues.append({
-                    "type": "style",
-                    "message": f"Function '{f.name}' is missing a docstring",
-                    "lineno": getattr(f, "lineno", None),
-                    "severity": "low",
-                })
-        # Cyclomatic complexity (rough heuristic)
-        complexity = 1
+        functions = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+        classes = [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+        imports = []
         for node in ast.walk(tree):
-            if isinstance(node, (ast.If, ast.For, ast.While, ast.And, ast.Or, ast.Try, ast.With, ast.BoolOp)):
-                complexity += 1
-        metrics["estimated_cyclomatic_complexity"] = complexity
+            if isinstance(node, ast.Import):
+                imports.extend([alias.name for alias in node.names])
+            elif isinstance(node, ast.ImportFrom):
+                imports.append(node.module or "")
+        
+        return {
+            "functions": functions,
+            "classes": classes,
+            "imports": list(set(imports)),
+            "lines": len(code.splitlines()),
+        }
     except SyntaxError as e:
-        issues.append({
-            "type": "syntax",
-            "message": str(e),
-            "lineno": getattr(e, "lineno", None),
-            "severity": "high",
-        })
+        return {"error": f"Syntax error: {str(e)}", "line": e.lineno}
 
-    # Long line check
-    long_lines = [i + 1 for i, l in enumerate(lines) if len(l) > 120]
-    if long_lines:
-        issues.append({
-            "type": "style",
-            "message": f"Found {len(long_lines)} lines longer than 120 characters",
-            "lines": long_lines,
-            "severity": "low",
-        })
+def detect_code_issues(code: str, language: str) -> List[Dict[str, Any]]:
+    issues = []
+    lines = code.splitlines()
+    
+    if language == "python":
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if "print(" in stripped and not stripped.startswith("#"):
+                issues.append({
+                    "line": i,
+                    "type": "debug_code",
+                    "message": "Consider removing debug print statements",
+                    "severity": "low"
+                })
+            if "TODO" in stripped or "FIXME" in stripped:
+                issues.append({
+                    "line": i,
+                    "type": "todo",
+                    "message": "Unresolved TODO/FIXME comment",
+                    "severity": "info"
+                })
+    
+    return issues
 
-    quality_score = max(0, 100 - len(issues) * 3 - max(0, metrics.get("estimated_cyclomatic_complexity", 0) - 10))
+def generate_suggestions(code: str, language: str) -> List[str]:
+    suggestions = []
+    if language == "python":
+        if "import *" in code:
+            suggestions.append("Avoid wildcard imports for better code clarity")
+        if code.count("\n") > 300:
+            suggestions.append("Consider splitting this file into smaller modules")
+        if "global " in code:
+            suggestions.append("Minimize use of global variables")
+    return suggestions
 
-    return {
-        "language": "python",
-        "quality_score": quality_score,
-        "issues": issues,
-        "metrics": metrics,
-    }
+# --- API Routes with /api prefix ---
 
-
-def naive_optimize_python(code: str) -> Dict[str, Any]:
-    """Very light optimization/refactor suggestions. Non-destructive."""
-    changes: List[str] = []
-    optimized = code
-
-    # Strip trailing spaces
-    before = optimized
-    optimized = "\n".join(line.rstrip() for line in optimized.splitlines())
-    if optimized != before:
-        changes.append("Removed trailing whitespace")
-
-    # Replace double quotes with single quotes when safe (simple heuristic)
-    # Keep it conservative to avoid breaking triple-quoted strings
-    if '"' in optimized and "'''" not in optimized and '"""' not in optimized:
-        maybe = optimized.replace('"', "'")
-        if maybe != optimized:
-            optimized = maybe
-            changes.append("Normalized quotes to single quotes")
-
-    report = {
-        "improvements_made": len(changes),
-        "changes": changes,
-        "before_size": len(code),
-        "after_size": len(optimized),
-        "reduction_percent": round((1 - len(optimized) / len(code), 4)[1] * 100 if len(code) else 0, 2),
-    }
-    return {"optimized_code": optimized, "report": report}
-
-
-# --- Root/health ---
-@app.get("/")
-def root():
-    return {
-        "message": "MARVIN backend is running",
-        "version": "1.1.0",
-        "storage": str(BASE_STORAGE),
-        "endpoints": ["/create", "/upload", "/analyze", "/optimize", "/health"],
-    }
-
-@app.get("/health")
-def health_check():
-    return {
+@app.get("/api/health")
+async def health_check():
+    return JSONResponse({
         "status": "healthy",
         "service": "MARVIN API",
-        "storage_writable": os.access(BASE_STORAGE, os.W_OK),
-        "timestamp": int(time.time()),
+        "version": "1.1.0",
+        "timestamp": time.time()
+    })
+
+@app.post("/api/create", response_model=dict)
+async def create_project(project: ProjectCreate):
+    project_id = hashlib.sha256(f"{project.name}{time.time()}".encode()).hexdigest()[:16]
+    project_dir = FILES_DIR / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    
+    metadata = {
+        "project_id": project_id,
+        "name": project.name,
+        "language": project.language,
+        "created_at": time.time()
     }
+    
+    with open(project_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    
+    return JSONResponse({
+        "project_id": project_id,
+        "message": "Project created successfully",
+        "metadata": metadata
+    })
 
-
-# --- Endpoints ---
-@app.post("/create")
-async def create_file(request: CreateFileRequest):
-    try:
-        language = request.language or detect_language_from_name(request.filename)
-        rel_path = request.filename
-        target = FILES_DIR / rel_path
-        info = safe_write_file(target, request.content.encode("utf-8"))
-        return {
-            "status": "success",
-            "message": f"Created {rel_path}",
-            "data": {
-                "filename": rel_path,
-                "language": language,
-                **info,
-            },
-        }
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/upload")
+@app.post("/api/upload", response_model=FileUploadResponse)
 async def upload_file(file: UploadFile = File(...)):
-    try:
-        filename = file.filename
-        if not filename or not any(filename.endswith(f".{ext}") for ext in ALLOWED_EXTS):
-            raise HTTPException(status_code=400, detail="Unsupported or missing file extension")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+    
+    language = detect_language(file.filename)
+    if not language:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed extensions: {', '.join(ALLOWED_EXTS.keys())}"
+        )
+    
+    content = await file.read()
+    file_id = compute_file_hash(content)
+    file_path = FILES_DIR / f"{file_id}_{file.filename}"
+    
+    with open(file_path, "wb") as f:
+        f.write(content)
+    
+    return JSONResponse({
+        "file_id": file_id,
+        "filename": file.filename,
+        "size": len(content),
+        "language": language
+    })
 
-        content = await file.read()
-        language = detect_language_from_name(filename)
+@app.post("/api/analyze", response_model=AnalysisResponse)
+async def analyze_code(req: AnalysisRequest):
+    matching_files = list(FILES_DIR.glob(f"{req.file_id}_*"))
+    if not matching_files:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    file_path = matching_files[0]
+    with open(file_path, "r", encoding="utf-8") as f:
+        code = f.read()
+    
+    language = detect_language(file_path.name)
+    summary = analyze_python_code(code) if language == "python" else {"lines": len(code.splitlines())}
+    issues = detect_code_issues(code, language or "")
+    suggestions = generate_suggestions(code, language or "")
+    
+    analysis_file = ANALYSIS_DIR / f"{req.file_id}_analysis.json"
+    analysis_data = {
+        "file_id": req.file_id,
+        "summary": summary,
+        "issues": issues,
+        "suggestions": suggestions,
+        "timestamp": time.time()
+    }
+    
+    with open(analysis_file, "w") as f:
+        json.dump(analysis_data, f, indent=2)
+    
+    return JSONResponse(analysis_data)
 
-        # Write to storage with content-based name to avoid collisions
-        digest = sha256_bytes(content)[:12]
-        safe_name = f"{Path(filename).stem}.{digest}.{Path(filename).suffix.lstrip('.')}"
-        target = FILES_DIR / safe_name
-        info = safe_write_file(target, content)
+@app.post("/api/optimize", response_model=OptimizationResponse)
+async def optimize_code(req: OptimizationRequest):
+    matching_files = list(FILES_DIR.glob(f"{req.file_id}_*"))
+    if not matching_files:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    file_path = matching_files[0]
+    with open(file_path, "r", encoding="utf-8") as f:
+        original_code = f.read()
+    
+    optimized_code = original_code
+    changes = []
+    
+    if req.optimization_type == "performance":
+        if "print(" in original_code:
+            optimized_code = "\n".join(
+                line for line in original_code.splitlines()
+                if "print(" not in line or line.strip().startswith("#")
+            )
+            changes.append({
+                "type": "removed_debug_prints",
+                "description": "Removed debug print statements"
+            })
+    
+    metrics = {
+        "original_lines": len(original_code.splitlines()),
+        "optimized_lines": len(optimized_code.splitlines()),
+        "reduction": len(original_code) - len(optimized_code)
+    }
+    
+    return JSONResponse({
+        "file_id": req.file_id,
+        "optimized_code": optimized_code,
+        "changes": changes,
+        "metrics": metrics
+    })
 
-        return {
-            "status": "success",
-            "message": f"Uploaded {filename}",
-            "data": {
-                "original_filename": filename,
-                "stored_filename": safe_name,
-                "language": language,
-                **info,
-                "content_type": file.content_type,
-            },
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/analyze")
-async def analyze_code(request: CodeRequest):
-    try:
-        language = (request.language or detect_language_from_name(request.filename or "")).lower()
-        code = request.code or ""
-
-        if language in ("python", "py", ""):
-            analysis = analyze_python(code)
-        else:
-            # Generic analysis fallback
-            lines = code.splitlines()
-            non_empty = [l for l in lines if l.strip()]
-            analysis = {
-                "language": language or "plain",
-                "quality_score": 80 if len(code) > 0 else 0,
-                "issues": [],
-                "metrics": {
-                    "total_lines": len(lines),
-                    "code_lines": len(non_empty),
-                    "blank_lines": len(lines) - len(non_empty),
-                },
-            }
-
-        # Persist analysis report (optional)
-        out_name = f"{(request.filename or 'snippet').replace('/', '_')}.analysis.json"
-        out_path = ANALYSIS_DIR / out_name
-        safe_write_file(out_path, json.dumps(analysis, indent=2).encode("utf-8"))
-
-        return {
-            "status": "success",
-            "message": f"Analysis completed for {request.filename or 'snippet'}",
-            "data": {
-                "filename": request.filename,
-                "language": analysis.get("language"),
-                "analysis": analysis,
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/optimize")
-async def optimize_code(request: CodeRequest):
-    try:
-        language = (request.language or detect_language_from_name(request.filename or "")).lower()
-        code = request.code or ""
-
-        if language in ("python", "py", ""):
-            result = naive_optimize_python(code)
-        else:
-            # Placeholder for other languages: no-op but still structured
-            result = {"optimized_code": code, "report": {"improvements_made": 0, "changes": [], "before_size": len(code), "after_size": len(code), "reduction_percent": 0.0}}
-
-        return {
-            "status": "success",
-            "message": f"Optimization completed for {request.filename or 'snippet'}",
-            "data": {
-                "filename": request.filename,
-                "language": language or "plain",
-                **result,
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
