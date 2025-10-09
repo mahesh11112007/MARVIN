@@ -7,11 +7,19 @@ import shutil
 import hashlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, validator
+
+# --- Configuration and Directories ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+FILES_DIR = BASE_DIR / "uploaded_files"
+FILES_DIR.mkdir(exist_ok=True)
+ANALYSIS_DIR = BASE_DIR / "analysis_results"
+ANALYSIS_DIR.mkdir(exist_ok=True)
 
 # --- App setup ---
 app = FastAPI(
@@ -21,7 +29,7 @@ app = FastAPI(
 )
 
 # Templates setup
-templates = Jinja2Templates(directory="../templates")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 # CORS middleware configuration
 app.add_middleware(
@@ -43,14 +51,6 @@ async def global_exception_handler(request: Request, exc: Exception):
             "path": str(request.url)
         }
     )
-
-# --- Configuration and Directories ---
-BASE_DIR = Path(__file__).resolve().parent.parent
-FILES_DIR = BASE_DIR / "uploaded_files"
-FILES_DIR.mkdir(exist_ok=True)
-
-ANALYSIS_DIR = BASE_DIR / "analysis_results"
-ANALYSIS_DIR.mkdir(exist_ok=True)
 
 # --- Pydantic Models ---
 class FileUploadResponse(BaseModel):
